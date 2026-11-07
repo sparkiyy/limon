@@ -1,7 +1,7 @@
 use crate::config::LimonConfig;
 use crate::processor::{is_luau_file, process_project, process_single_file, should_ignore, ProcessStats};
 use notify::{Event, RecursiveMode, Result as NotifyResult, Watcher};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -30,11 +30,10 @@ pub fn watch_project(
 
     let initial_stats = process_project(root_dir, final_output.as_deref(), &config)?;
     println!(
-        "[limon] Initial processing complete: scanned {}, processed {}, modified {}, skipped without .luaurc {}",
+        "[limon] Initial processing complete: scanned {}, processed {}, modified {}",
         initial_stats.files_scanned,
         initial_stats.files_processed,
-        initial_stats.files_modified,
-        initial_stats.files_skipped_no_luaurc
+        initial_stats.files_modified
     );
 
     let (tx, rx) = channel();
@@ -51,10 +50,7 @@ pub fn watch_project(
 
     println!("[limon] Watching '{}' for changes (Press Ctrl+C to exit)...", root_dir.display());
 
-    let mut cache = HashMap::new();
-
     while let Ok(first_event) = rx.recv() {
-
         // Debounce window (100ms)
         std::thread::sleep(Duration::from_millis(100));
 
@@ -79,7 +75,7 @@ pub fn watch_project(
 
             let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
-            if file_name == "limon.toml" || file_name == ".luaurc" {
+            if file_name == "limon.toml" {
                 needs_full_reprocess = true;
                 break;
             }
@@ -90,8 +86,7 @@ pub fn watch_project(
         }
 
         if needs_full_reprocess {
-            println!("[limon] Configuration changed (.luaurc / limon.toml). Reloading...");
-            cache.clear();
+            println!("[limon] Configuration changed (limon.toml). Reloading...");
             if let Ok((reloaded_cfg, _)) = LimonConfig::find_and_load(root_dir, config_path_opt.as_deref()) {
                 config = reloaded_cfg;
             }
@@ -127,7 +122,6 @@ pub fn watch_project(
                     root_dir,
                     final_output.as_deref(),
                     &config,
-                    &mut cache,
                     &mut stats,
                 ) {
                     Ok(modified) => {

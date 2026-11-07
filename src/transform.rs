@@ -3,21 +3,16 @@ use full_moon::ast::{Call, Expression, FunctionArgs, FunctionCall, Prefix, Suffi
 use full_moon::tokenizer::{Token, TokenType};
 use full_moon::visitors::VisitorMut;
 use full_moon::ShortString;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub struct RequireAliasReplacer<'a> {
-    pub valid_luaurc_aliases: &'a HashSet<String>,
     pub alias_expansions: &'a HashMap<String, String>,
     pub modified: bool,
 }
 
 impl<'a> RequireAliasReplacer<'a> {
-    pub fn new(
-        valid_luaurc_aliases: &'a HashSet<String>,
-        alias_expansions: &'a HashMap<String, String>,
-    ) -> Self {
+    pub fn new(alias_expansions: &'a HashMap<String, String>) -> Self {
         Self {
-            valid_luaurc_aliases,
             alias_expansions,
             modified: false,
         }
@@ -43,11 +38,6 @@ impl<'a> RequireAliasReplacer<'a> {
 
         // In a Roblox environment, `@game` is default and should be ignored
         if alias_name == "game" {
-            return None;
-        }
-
-        // Must be defined in the corresponding .luaurc
-        if !self.valid_luaurc_aliases.contains(alias_name) {
             return None;
         }
 
@@ -188,19 +178,18 @@ impl<'a> VisitorMut for RequireAliasReplacer<'a> {
     }
 }
 
-/// Transforms Luau code by expanding alias requires defined in `.luaurc` and `limon.toml`.
+/// Transforms Luau code by expanding alias requires defined directly in `limon.toml`.
 /// Returns `(transformed_code, was_modified)` or error if parsing fails.
 pub fn transform_luau(
     code: &str,
-    valid_luaurc_aliases: &HashSet<String>,
     alias_expansions: &HashMap<String, String>,
 ) -> Result<(String, bool), Vec<full_moon::Error>> {
-    if valid_luaurc_aliases.is_empty() || alias_expansions.is_empty() {
+    if alias_expansions.is_empty() {
         return Ok((code.to_string(), false));
     }
 
     let ast = full_moon::parse(code)?;
-    let mut replacer = RequireAliasReplacer::new(valid_luaurc_aliases, alias_expansions);
+    let mut replacer = RequireAliasReplacer::new(alias_expansions);
     let new_ast = replacer.visit_ast(ast);
 
     if replacer.modified {
@@ -216,10 +205,6 @@ mod tests {
 
     #[test]
     fn test_transform_requires() {
-        let mut valid_aliases = HashSet::new();
-        valid_aliases.insert("pkg".to_string());
-        valid_aliases.insert("utils".to_string());
-
         let mut expansions = HashMap::new();
         expansions.insert(
             "pkg".to_string(),
@@ -243,7 +228,7 @@ local H = require("@pkg/Chain"):Init()
 "#;
 
         let (output, modified) =
-            transform_luau(input, &valid_aliases, &expansions).expect("transform failed");
+            transform_luau(input, &expansions).expect("transform failed");
 
         assert!(modified);
         assert!(output.contains(r#"local A = require("@game/ReplicatedStorage/Packages/Roact")"#));
@@ -259,9 +244,6 @@ local H = require("@pkg/Chain"):Init()
 
     #[test]
     fn test_trailing_slash_normalization() {
-        let mut valid_aliases = HashSet::new();
-        valid_aliases.insert("pkg".to_string());
-
         let mut expansions = HashMap::new();
         expansions.insert(
             "pkg".to_string(),
@@ -270,7 +252,7 @@ local H = require("@pkg/Chain"):Init()
 
         let input = r#"local A = require("@pkg/Sub")"#;
         let (output, modified) =
-            transform_luau(input, &valid_aliases, &expansions).expect("transform failed");
+            transform_luau(input, &expansions).expect("transform failed");
         assert!(modified);
         assert_eq!(
             output,

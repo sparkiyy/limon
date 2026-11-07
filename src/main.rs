@@ -182,10 +182,6 @@ fn main() {
                         "  Modified:               {} file(s)",
                         stats.files_modified
                     );
-                    println!(
-                        "  Skipped (no .luaurc):   {} file(s)",
-                        stats.files_skipped_no_luaurc
-                    );
                 }
                 Err(err) => {
                     eprintln!("[limon] Error: {}", err);

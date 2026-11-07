@@ -1,15 +1,13 @@
-use crate::config::{resolve_luaurc_aliases, LimonConfig};
+use crate::config::LimonConfig;
 use crate::transform::transform_luau;
-use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Default, Clone)]
 pub struct ProcessStats {
     pub files_scanned: usize,
     pub files_processed: usize,
     pub files_modified: usize,
-    pub files_skipped_no_luaurc: usize,
 }
 
 pub fn is_luau_file(path: &Path) -> bool {
@@ -60,7 +58,6 @@ pub fn process_single_file(
     root_dir: &Path,
     output_dir: Option<&Path>,
     config: &LimonConfig,
-    cache: &mut HashMap<PathBuf, Option<HashSet<String>>>,
     stats: &mut ProcessStats,
 ) -> Result<bool, String> {
     stats.files_scanned += 1;
@@ -84,30 +81,12 @@ pub fn process_single_file(
         return Ok(false);
     }
 
-    // Check .luaurc
-    let luaurc_aliases = resolve_luaurc_aliases(file_path, root_dir, cache);
-
-    if luaurc_aliases.is_none() {
-        // No .luaurc found for this file: do nothing
-        stats.files_skipped_no_luaurc += 1;
-        if let Some(ref dest) = target_path {
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Could not create directory '{}': {}", parent.display(), e))?;
-            }
-            fs::copy(file_path, dest)
-                .map_err(|e| format!("Could not copy '{}' to '{}': {}", file_path.display(), dest.display(), e))?;
-        }
-        return Ok(false);
-    }
-
     stats.files_processed += 1;
-    let aliases = luaurc_aliases.unwrap();
 
     let content = fs::read_to_string(file_path)
         .map_err(|e| format!("Could not read '{}': {}", file_path.display(), e))?;
 
-    let (transformed, modified) = match transform_luau(&content, &aliases, &config.aliases) {
+    let (transformed, modified) = match transform_luau(&content, &config.aliases) {
         Ok(res) => res,
         Err(err) => {
             let err_msg = err.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ");
@@ -147,7 +126,6 @@ pub fn process_project(
     config: &LimonConfig,
 ) -> Result<ProcessStats, String> {
     let mut stats = ProcessStats::default();
-    let mut cache = HashMap::new();
 
     if !root_dir.exists() {
         return Err(format!("Directory '{}' does not exist.", root_dir.display()));
@@ -159,7 +137,6 @@ pub fn process_project(
             root_dir.parent().unwrap_or(root_dir),
             output_dir,
             config,
-            &mut cache,
             &mut stats,
         )?;
         return Ok(stats);
@@ -188,7 +165,6 @@ pub fn process_project(
                     root_dir,
                     output_dir,
                     config,
-                    &mut cache,
                     &mut stats,
                 )?;
             }
