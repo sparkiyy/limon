@@ -10,6 +10,10 @@ on:
         description: "Tag name for the release (e.g. v0.1.0)"
         required: true
         default: "v0.1.0"
+      target_filter:
+        description: "Filter targets to build (e.g. 'apple-darwin' or leave empty for all)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -30,6 +34,7 @@ jobs:
   upload-assets:
     name: Build & Upload (${{ matrix.target }})
     needs: create-release
+    if: ${{ !inputs.target_filter || contains(matrix.target, inputs.target_filter) }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,9 +47,9 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-latest
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
