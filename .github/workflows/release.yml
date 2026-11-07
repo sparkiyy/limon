@@ -44,7 +44,7 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-13
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-13
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
@@ -65,4 +65,4 @@ jobs:
           zip: windows
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
-          ref: ${{ github.event.inputs.tag_name || github.ref_name }}
+          ref: refs/tags/${{ github.event.inputs.tag_name || github.ref_name }}
