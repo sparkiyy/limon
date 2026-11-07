@@ -1,0 +1,5 @@
+# Archivo de configuración para limon
+# output = "dist" # Carpeta de salida por defecto (opcional)
+
+[aliases]
+pkg = "@game/ReplicatedStorage/Packages"
