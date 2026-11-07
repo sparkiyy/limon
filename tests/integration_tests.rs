@@ -19,7 +19,8 @@ fn test_limon_cli_help_and_version() {
         .expect("failed to run limon --version");
     assert!(output_v.status.success());
     let stdout_v = String::from_utf8_lossy(&output_v.stdout);
-    assert!(stdout_v.contains("limon 0.1.0"));
+    let expected_version = format!("limon {}", env!("CARGO_PKG_VERSION"));
+    assert!(stdout_v.contains(&expected_version));
 }
 
 #[test]
