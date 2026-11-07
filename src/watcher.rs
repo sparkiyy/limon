@@ -1,5 +1,8 @@
 use crate::config::LimonConfig;
-use crate::processor::{is_luau_file, process_project, process_single_file, should_ignore, ProcessStats};
+use crate::processor::{
+    get_relative_path, is_luau_file, process_project, process_single_file, should_ignore,
+    ProcessStats,
+};
 use notify::{Event, RecursiveMode, Result as NotifyResult, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -21,7 +24,7 @@ pub fn watch_project(
         .map(|p| p.to_path_buf())
         .or_else(|| config.output.as_ref().map(PathBuf::from));
 
-    println!("[limon] Starting initial process pass on '{}'...", root_dir.display());
+    println!("[limon] Starting initial pass on '{}'...", root_dir.display());
     if let Some(ref out) = final_output {
         println!("[limon] Output directory: '{}'", out.display());
     } else {
@@ -92,10 +95,12 @@ pub fn watch_project(
             }
             match process_project(root_dir, final_output.as_deref(), &config) {
                 Ok(stats) => {
-                    println!(
-                        "[limon] Full re-process complete: modified {} of {} files",
-                        stats.files_modified, stats.files_processed
-                    );
+                    if stats.files_modified > 0 {
+                        println!(
+                            "[limon] Full re-process complete: modified {} file(s)",
+                            stats.files_modified
+                        );
+                    }
                 }
                 Err(err) => {
                     eprintln!("[limon] Re-process error: {}", err);
@@ -106,11 +111,11 @@ pub fn watch_project(
                 if !file.exists() {
                     // File was deleted
                     if let Some(ref out) = final_output {
-                        let rel = file.strip_prefix(root_dir).unwrap_or(&file);
-                        let dest = out.join(rel);
+                        let rel = get_relative_path(&file, root_dir);
+                        let dest = out.join(&rel);
                         if dest.exists() {
                             let _ = std::fs::remove_file(&dest);
-                            println!("[limon] Deleted output file: '{}'", dest.display());
+                            println!("[limon] Deleted output file: '{}'", rel.display());
                         }
                     }
                     continue;
@@ -125,11 +130,9 @@ pub fn watch_project(
                     &mut stats,
                 ) {
                     Ok(modified) => {
-                        let rel = file.strip_prefix(root_dir).unwrap_or(&file);
                         if modified {
+                            let rel = get_relative_path(&file, root_dir);
                             println!("[limon] Transformed: '{}'", rel.display());
-                        } else if final_output.is_some() {
-                            println!("[limon] Synchronized: '{}'", rel.display());
                         }
                     }
                     Err(err) => {

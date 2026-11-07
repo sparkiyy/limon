@@ -145,7 +145,10 @@ fn main() {
         return;
     }
 
-    let root_path = args.path;
+    let root_path = match args.path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => args.path,
+    };
 
     match args.command.unwrap() {
         Subcommand::Process => {

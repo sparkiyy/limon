@@ -1,7 +1,7 @@
 use crate::config::LimonConfig;
 use crate::transform::transform_luau;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Clone)]
 pub struct ProcessStats {
@@ -18,19 +18,44 @@ pub fn is_luau_file(path: &Path) -> bool {
     }
 }
 
+pub fn get_relative_path(file_path: &Path, root_dir: &Path) -> PathBuf {
+    if let Ok(rel) = file_path.strip_prefix(root_dir) {
+        return rel.to_path_buf();
+    }
+    let canon_file = file_path.canonicalize().unwrap_or_else(|_| file_path.to_path_buf());
+    let canon_root = root_dir.canonicalize().unwrap_or_else(|_| root_dir.to_path_buf());
+    if let Ok(rel) = canon_file.strip_prefix(&canon_root) {
+        return rel.to_path_buf();
+    }
+    // Fallback: extract filename
+    file_path
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| file_path.to_path_buf())
+}
+
 pub fn should_ignore(path: &Path, root_dir: &Path, output_dir: Option<&Path>) -> bool {
     let file_name = match path.file_name().and_then(|s| s.to_str()) {
         Some(name) => name,
         None => return false,
     };
 
-    // Ignore VCS / common build directories
-    if file_name == ".git" || file_name == "node_modules" || file_name == "target" {
+    // Ignore VCS / build directories / editor caches
+    if file_name == ".git"
+        || file_name == "node_modules"
+        || file_name == "target"
+        || file_name == ".vscode"
+        || file_name == ".idea"
+    {
         return true;
     }
 
     // Ignore output directory if inside root
     if let Some(out) = output_dir {
+        if path == out || path.starts_with(out) {
+            return true;
+        }
+
         let abs_path = path.canonicalize().unwrap_or_else(|_| {
             if path.is_absolute() {
                 path.to_path_buf()
@@ -45,6 +70,7 @@ pub fn should_ignore(path: &Path, root_dir: &Path, output_dir: Option<&Path>) ->
                 root_dir.join(out)
             }
         });
+
         if abs_path == abs_out || abs_path.starts_with(&abs_out) {
             return true;
         }
@@ -62,21 +88,35 @@ pub fn process_single_file(
 ) -> Result<bool, String> {
     stats.files_scanned += 1;
 
-    let rel_path = file_path
-        .strip_prefix(root_dir)
-        .unwrap_or(file_path);
+    let rel_path = get_relative_path(file_path, root_dir);
+    let target_path = output_dir.map(|out| out.join(&rel_path));
 
-    let target_path = output_dir.map(|out| out.join(rel_path));
-
-    // Non-Luau file handling
+    // Handle non-Luau files (only copy if output_dir is specified and contents differ)
     if !is_luau_file(file_path) {
         if let Some(ref dest) = target_path {
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("Could not create directory '{}': {}", parent.display(), e))?;
+            if dest != file_path {
+                let need_copy = if dest.exists() {
+                    match (fs::metadata(file_path), fs::metadata(dest)) {
+                        (Ok(src_m), Ok(dst_m)) => {
+                            src_m.len() != dst_m.len()
+                        }
+                        _ => true,
+                    }
+                } else {
+                    true
+                };
+
+                if need_copy {
+                    if let Some(parent) = dest.parent() {
+                        fs::create_dir_all(parent).map_err(|e| {
+                            format!("Could not create directory '{}': {}", parent.display(), e)
+                        })?;
+                    }
+                    fs::copy(file_path, dest).map_err(|e| {
+                        format!("Could not copy '{}' to '{}': {}", file_path.display(), dest.display(), e)
+                    })?;
+                }
             }
-            fs::copy(file_path, dest)
-                .map_err(|e| format!("Could not copy '{}' to '{}': {}", file_path.display(), dest.display(), e))?;
         }
         return Ok(false);
     }
@@ -99,22 +139,44 @@ pub fn process_single_file(
         }
     };
 
-    if modified {
-        stats.files_modified += 1;
+    if let Some(ref dest) = target_path {
+        // Output directory mode
+        if dest != file_path {
+            let to_write = if modified { &transformed } else { &content };
+            let need_write = if dest.exists() {
+                match fs::read(dest) {
+                    Ok(existing) => existing != to_write.as_bytes(),
+                    Err(_) => true,
+                }
+            } else {
+                true
+            };
+
+            if need_write {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        format!("Could not create directory '{}': {}", parent.display(), e)
+                    })?;
+                }
+                fs::write(dest, to_write)
+                    .map_err(|e| format!("Could not write to '{}': {}", dest.display(), e))?;
+            }
+        }
+    } else if modified {
+        // In-place modification: ONLY write if file content actually changed
+        let need_write = match fs::read(file_path) {
+            Ok(existing) => existing != transformed.as_bytes(),
+            Err(_) => true,
+        };
+
+        if need_write {
+            fs::write(file_path, &transformed)
+                .map_err(|e| format!("Could not write to '{}': {}", file_path.display(), e))?;
+        }
     }
 
-    if let Some(ref dest) = target_path {
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Could not create directory '{}': {}", parent.display(), e))?;
-        }
-        let to_write = if modified { &transformed } else { &content };
-        fs::write(dest, to_write)
-            .map_err(|e| format!("Could not write to '{}': {}", dest.display(), e))?;
-    } else if modified {
-        // In-place modification
-        fs::write(file_path, &transformed)
-            .map_err(|e| format!("Could not write to '{}': {}", file_path.display(), e))?;
+    if modified {
+        stats.files_modified += 1;
     }
 
     Ok(modified)
@@ -142,7 +204,6 @@ pub fn process_project(
         return Ok(stats);
     }
 
-    // Traverse directory recursively
     let mut dirs_to_visit = vec![root_dir.to_path_buf()];
 
     while let Some(current_dir) = dirs_to_visit.pop() {

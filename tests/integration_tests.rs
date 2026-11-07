@@ -77,6 +77,22 @@ return Sub
     let dist_sub = fs::read_to_string(output_dir.join("src/sub/sub.luau")).unwrap();
     assert!(dist_sub.contains(r#"require("@game/ReplicatedStorage/Packages/Sub")"#));
 
+    // Second run: verify file modification times do not change when files are already up-to-date
+    let mtime_before = fs::metadata(output_dir.join("src/main.luau")).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    
+    let status2 = Command::new(env!("CARGO_BIN_EXE_limon"))
+        .arg("process")
+        .arg(&temp_dir)
+        .arg("--output")
+        .arg(&output_dir)
+        .status()
+        .expect("failed second run");
+    assert!(status2.success());
+
+    let mtime_after = fs::metadata(output_dir.join("src/main.luau")).unwrap().modified().unwrap();
+    assert_eq!(mtime_before, mtime_after, "mtime must NOT change if file content is already up-to-date!");
+
     // Cleanup
     let _ = fs::remove_dir_all(&temp_dir);
 }
