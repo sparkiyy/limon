@@ -1,21 +1,19 @@
 mod config;
+mod env_transform;
 mod processor;
 mod transform;
-mod watcher;
 
 use config::LimonConfig;
 use processor::process_project;
 use std::env;
 use std::path::PathBuf;
 use std::process;
-use watcher::watch_project;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug)]
 enum Subcommand {
     Process,
-    Watch,
 }
 
 #[derive(Debug)]
@@ -24,32 +22,33 @@ struct CliArgs {
     path: PathBuf,
     output: Option<PathBuf>,
     config: Option<PathBuf>,
+    clean: bool,
+    strict: bool,
     help: bool,
     version: bool,
 }
 
 fn print_help() {
     println!(
-        r#"limon {} - Minimal Luau require alias expander
+        r#"limon {} - Luau require alias expander & static env preprocessor
 
 USAGE:
     limon <SUBCOMMAND> [PATH] [OPTIONS]
 
 SUBCOMMANDS:
-    process     Process Luau files once and expand require aliases
-    watch       Watch directory for changes and process Luau files interactively
+    process     Process Luau files once, inject env vars, and expand require aliases
 
 OPTIONS:
     -o, --output <DIR>     Output directory for processed files (overrides limon.toml)
     -c, --config <FILE>    Path to custom configuration file (default: limon.toml)
+        --clean            Remove orphaned files in output directory
+        --strict           Fail on unresolved require aliases
     -h, --help             Print help information
     -v, --version          Print version information
 
 EXAMPLES:
     limon process src --output dist
-    limon process -o dist
-    limon watch src --output dist
-    limon watch
+    limon process -o dist --clean --strict
 "#,
         VERSION
     );
@@ -62,6 +61,8 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut positional_path = None;
     let mut output = None;
     let mut config = None;
+    let mut clean = false;
+    let mut strict = false;
     let mut help = false;
     let mut version = false;
 
@@ -75,6 +76,14 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "-v" | "--version" => {
                 version = true;
+                i += 1;
+            }
+            "--clean" => {
+                clean = true;
+                i += 1;
+            }
+            "--strict" => {
+                strict = true;
                 i += 1;
             }
             "-o" | "--output" => {
@@ -97,12 +106,10 @@ fn parse_args() -> Result<CliArgs, String> {
                 command = Some(Subcommand::Process);
                 i += 1;
             }
-            "watch" if command.is_none() => {
-                command = Some(Subcommand::Watch);
-                i += 1;
-            }
             other if !other.starts_with('-') => {
-                if positional_path.is_none() {
+                if command.is_none() {
+                    return Err(format!("Unknown subcommand '{}'", other));
+                } else if positional_path.is_none() {
                     positional_path = Some(PathBuf::from(other));
                 } else {
                     return Err(format!("Unexpected argument '{}'", other));
@@ -120,6 +127,8 @@ fn parse_args() -> Result<CliArgs, String> {
         path: positional_path.unwrap_or_else(|| PathBuf::from(".")),
         output,
         config,
+        clean,
+        strict,
         help,
         version,
     })
@@ -152,13 +161,16 @@ fn main() {
 
     match args.command.unwrap() {
         Subcommand::Process => {
-            let (config, _) = match LimonConfig::find_and_load(&root_path, args.config.as_deref()) {
+            let (mut config, _) = match LimonConfig::find_and_load(&root_path, args.config.as_deref()) {
                 Ok(cfg) => cfg,
                 Err(err) => {
                     eprintln!("[limon] Configuration error: {}", err);
                     process::exit(1);
                 }
             };
+
+            config.clean = config.clean || args.clean;
+            config.strict = config.strict || args.strict;
 
             let final_output = args.output
                 .or_else(|| config.output.as_ref().map(PathBuf::from));
@@ -185,17 +197,17 @@ fn main() {
                         "  Modified:               {} file(s)",
                         stats.files_modified
                     );
+                    if stats.files_removed > 0 {
+                        println!(
+                            "  Removed:                {} file(s)",
+                            stats.files_removed
+                        );
+                    }
                 }
                 Err(err) => {
                     eprintln!("[limon] Error: {}", err);
                     process::exit(1);
                 }
-            }
-        }
-        Subcommand::Watch => {
-            if let Err(err) = watch_project(&root_path, args.output.as_deref(), args.config.as_deref()) {
-                eprintln!("[limon] Watcher error: {}", err);
-                process::exit(1);
             }
         }
     }

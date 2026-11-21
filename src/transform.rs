@@ -1,3 +1,5 @@
+use crate::config::LimonConfig;
+use crate::env_transform::{transform_env, ResolvedEnv};
 use full_moon::ast::punctuated::{Pair, Punctuated};
 use full_moon::ast::{Call, Expression, FunctionArgs, FunctionCall, Prefix, Suffix, VarExpression};
 use full_moon::tokenizer::{Token, TokenType};
@@ -5,15 +7,25 @@ use full_moon::visitors::VisitorMut;
 use full_moon::ShortString;
 use std::collections::HashMap;
 
+#[derive(Debug)]
+pub enum TransformError {
+    Parse(Vec<full_moon::Error>),
+    UnresolvedAliases(Vec<(String, usize)>),
+}
+
 pub struct RequireAliasReplacer<'a> {
     pub alias_expansions: &'a HashMap<String, String>,
+    pub strict: bool,
+    pub unresolved_aliases: Vec<(String, usize)>,
     pub modified: bool,
 }
 
 impl<'a> RequireAliasReplacer<'a> {
-    pub fn new(alias_expansions: &'a HashMap<String, String>) -> Self {
+    pub fn with_strict(alias_expansions: &'a HashMap<String, String>, strict: bool) -> Self {
         Self {
             alias_expansions,
+            strict,
+            unresolved_aliases: Vec::new(),
             modified: false,
         }
     }
@@ -36,13 +48,19 @@ impl<'a> RequireAliasReplacer<'a> {
             None => (alias_part, None),
         };
 
-        // In a Roblox environment, `@game` is default and should be ignored
-        if alias_name == "game" {
+        // Ignore built-in Luau / Roblox aliases
+        if alias_name == "game" || alias_name == "self" {
             return None;
         }
 
         // Must have an expansion defined in limon.toml
-        let replacement = self.alias_expansions.get(alias_name)?;
+        let Some(replacement) = self.alias_expansions.get(alias_name) else {
+            if self.strict {
+                self.unresolved_aliases
+                    .push((alias_name.to_string(), token.start_position().line()));
+            }
+            return None;
+        };
 
         let expanded = match subpath {
             Some(sub) => {
@@ -178,25 +196,70 @@ impl<'a> VisitorMut for RequireAliasReplacer<'a> {
     }
 }
 
-/// Transforms Luau code by expanding alias requires defined directly in `limon.toml`.
-/// Returns `(transformed_code, was_modified)` or error if parsing fails.
-pub fn transform_luau(
+/// Transforms Luau code by expanding alias requires defined directly in `limon.toml`,
+/// optionally failing on unresolved aliases when `strict` is `true`.
+pub fn transform_luau_aliases(
     code: &str,
     alias_expansions: &HashMap<String, String>,
-) -> Result<(String, bool), Vec<full_moon::Error>> {
-    if alias_expansions.is_empty() {
+    strict: bool,
+) -> Result<(String, bool), TransformError> {
+    if alias_expansions.is_empty() && !strict {
         return Ok((code.to_string(), false));
     }
 
-    let ast = full_moon::parse(code)?;
-    let mut replacer = RequireAliasReplacer::new(alias_expansions);
+    let ast = full_moon::parse(code).map_err(TransformError::Parse)?;
+    let mut replacer = RequireAliasReplacer::with_strict(alias_expansions, strict);
     let new_ast = replacer.visit_ast(ast);
+
+    if !replacer.unresolved_aliases.is_empty() {
+        return Err(TransformError::UnresolvedAliases(
+            replacer.unresolved_aliases,
+        ));
+    }
 
     if replacer.modified {
         Ok((new_ast.to_string(), true))
     } else {
         Ok((code.to_string(), false))
     }
+}
+
+/// Transforms Luau code by expanding alias requires defined directly in `limon.toml`.
+/// Returns `(transformed_code, was_modified)` or error if parsing fails.
+#[cfg(test)]
+pub fn transform_luau(
+    code: &str,
+    alias_expansions: &HashMap<String, String>,
+) -> Result<(String, bool), Vec<full_moon::Error>> {
+    match transform_luau_aliases(code, alias_expansions, false) {
+        Ok(res) => Ok(res),
+        Err(TransformError::Parse(errs)) => Err(errs),
+        Err(TransformError::UnresolvedAliases(_)) => unreachable!(),
+    }
+}
+
+/// Transforms Luau code using full `LimonConfig` (env injection + DCE first, then require aliases).
+pub fn transform_luau_with_config(
+    code: &str,
+    config: &LimonConfig,
+    resolved_env: Option<&ResolvedEnv<'_>>,
+) -> Result<(String, bool), TransformError> {
+    let mut current = code.to_string();
+
+    if let (Some(env_cfg), Some(resolved)) = (config.active_env(), resolved_env) {
+        let (env_out, _) =
+            transform_env(&current, env_cfg, resolved).map_err(TransformError::Parse)?;
+        current = env_out;
+    }
+
+    if !config.aliases.is_empty() || config.strict {
+        let (alias_out, _) =
+            transform_luau_aliases(&current, &config.aliases, config.strict)?;
+        current = alias_out;
+    }
+
+    let modified = current != code;
+    Ok((current, modified))
 }
 
 #[cfg(test)]
@@ -258,5 +321,86 @@ local H = require("@pkg/Chain"):Init()
             output,
             r#"local A = require("@game/ReplicatedStorage/Packages/Sub")"#
         );
+    }
+
+    #[test]
+    fn test_strict_aliases_and_self_builtin() {
+        let mut expansions = HashMap::new();
+        expansions.insert(
+            "pkg".to_string(),
+            "@game/ReplicatedStorage/Packages".to_string(),
+        );
+
+        let ok_code = r#"
+local A = require("@pkg/Roact")
+local B = require("@game/ReplicatedStorage/Shared")
+local C = require("@self/Child")
+"#;
+        let (out, modified) =
+            transform_luau_aliases(ok_code, &expansions, true).expect("strict should succeed");
+        assert!(modified);
+        assert!(out.contains(r#"require("@game/ReplicatedStorage/Packages/Roact")"#));
+        assert!(out.contains(r#"require("@self/Child")"#));
+
+        let bad_code = "local A = require(\"@pkg/Ok\")\nlocal B = require(\"@typo/Missing\")\n";
+        let err = transform_luau_aliases(bad_code, &expansions, true)
+            .expect_err("strict should fail on @typo");
+        match err {
+            TransformError::UnresolvedAliases(list) => {
+                assert_eq!(list, vec![("typo".to_string(), 2)]);
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+
+        // Empty aliases with strict = true allows @game/@self and rejects @missing
+        let empty = HashMap::new();
+        let builtin_only = r#"
+local G = require("@game/A")
+local S = require("@self/B")
+"#;
+        assert!(transform_luau_aliases(builtin_only, &empty, true).is_ok());
+
+        let missing_with_empty = "local M = require(\"@missing/Lib\")";
+        assert!(matches!(
+            transform_luau_aliases(missing_with_empty, &empty, true),
+            Err(TransformError::UnresolvedAliases(v)) if v == vec![("missing".to_string(), 1)]
+        ));
+    }
+
+    #[test]
+    fn test_strict_aliases_ignores_dead_env_branch() {
+        use crate::config::EnvConfig;
+
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "pkg".to_string(),
+            "@game/ReplicatedStorage/Packages".to_string(),
+        );
+
+        let config = LimonConfig {
+            strict: true,
+            aliases,
+            env: Some(EnvConfig::default()),
+            ..LimonConfig::default()
+        };
+
+        let code = "\
+if _G.DEV then
+    local Dev = require(\"@dev_only/Inspector\")
+    Dev.open()
+else
+    local Prod = require(\"@pkg/Prod\")
+    Prod.run()
+end
+";
+        let vars = HashMap::from([("DEV".to_string(), "false".to_string())]);
+        let env_cfg = config.active_env().unwrap();
+        let resolved = ResolvedEnv::new(env_cfg, &vars).unwrap();
+
+        let (out, modified) =
+            transform_luau_with_config(code, &config, Some(&resolved)).expect("dead branch ignored");
+        assert!(modified);
+        assert!(!out.contains("dev_only"));
+        assert!(out.contains(r#"require("@game/ReplicatedStorage/Packages/Prod")"#));
     }
 }
