@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "limon"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "full_moon",
  "serde",
